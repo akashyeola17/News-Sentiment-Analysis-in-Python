@@ -1,0 +1,148 @@
+import streamlit as st
+
+# Set Streamlit page configuration (must be the first Streamlit command)
+st.set_page_config(page_title="📰 News Sentiment Analyzer", layout="centered")
+
+import requests
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from transformers import pipeline
+from dotenv import load_dotenv
+import os
+from datetime import date, timedelta
+
+# Load API key from .env
+load_dotenv()
+API_KEY = os.getenv("NEWS_API_KEY") or "cd55d0f94f8e42b3a1c6074d64c647d6"
+
+# Load summarization model (cached)
+@st.cache_resource
+def load_summarizer():
+    return pipeline("summarization", model="facebook/bart-large-cnn")
+
+summarizer = load_summarizer()
+
+# Get News Headlines
+def get_news(category, country='in', start_date=None, end_date=None, custom_query=None):
+    query = custom_query if custom_query else f"{category} news {country}"
+    url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={API_KEY}"
+
+    if start_date and end_date:
+        url += f"&from={start_date}&to={end_date}"
+
+    response = requests.get(url)
+    if response.status_code == 200:
+        articles = response.json().get("articles", [])
+        return [
+            {
+                "title": article.get("title"),
+                "description": article.get("description"),
+                "url": article.get("url"),
+                "source": article.get("source", {}).get("name", "")
+            }
+            for article in articles if article.get("title")
+        ]
+    return []
+
+# Sentiment Analysis
+def analyze_sentiment(headlines):
+    analyzer = SentimentIntensityAnalyzer()
+    results = {"positive": 0, "neutral": 0, "negative": 0}
+    details = {"positive": [], "neutral": [], "negative": []}
+
+    for article in headlines:
+        score = analyzer.polarity_scores(article["title"])["compound"]
+        if score >= 0.05:
+            results["positive"] += 1
+            details["positive"].append(article)
+        elif score <= -0.05:
+            results["negative"] += 1
+            details["negative"].append(article)
+        else:
+            results["neutral"] += 1
+            details["neutral"].append(article)
+    return results, details
+
+# Generate summary
+def summarize_text(text, max_len=130):
+    if not text or len(text.split()) < 20:
+        return "Not enough content to summarize."
+    try:
+        summary = summarizer(text, max_length=max_len, min_length=30, do_sample=False)[0]["summary_text"]
+        return summary
+    except Exception as e:
+        return "Error summarizing: " + str(e)
+
+# Pie Chart of Sentiment
+def plot_sentiment_chart(results):
+    labels = list(results.keys())
+    sizes = list(results.values())
+    colors = ["green", "gray", "red"]
+    fig, ax = plt.subplots()
+    ax.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90, colors=colors)
+    ax.axis("equal")
+    st.pyplot(fig)
+
+# Word Cloud
+def show_wordcloud(headlines):
+    text = " ".join([article['title'] for article in headlines])
+    wordcloud = WordCloud(width=800, height=400, background_color="white").generate(text)
+    fig, ax = plt.subplots()
+    ax.imshow(wordcloud, interpolation='bilinear')
+    ax.axis("off")
+    st.pyplot(fig)
+
+# Display headlines with summary
+def display_headlines(articles):
+    for article in articles[:5]:
+        st.markdown(f"**📰 {article['title']}**")
+        with st.expander("🔎 View Details and Summary"):
+            if article.get("description"):
+                st.write("📝 **Description:**", article["description"])
+                summary = summarize_text(article["description"])
+                st.write("📄 **Summary:**", summary)
+            else:
+                st.write("No description available to summarize.")
+            st.markdown(f"[🌐 Read full article]({article['url']})")
+        st.markdown("---")
+
+# Streamlit UI
+st.title("📰 Daily News Sentiment Analyzer")
+
+# UI controls
+category = st.selectbox("Choose news category:", ["general", "business", "entertainment", "health", "science", "sports", "technology"])
+country = st.selectbox(
+    "Choose country:",
+    ["in", "us", "gb", "ca", "au"],
+    format_func=lambda x: {"in": "India", "us": "USA", "gb": "UK", "ca": "Canada", "au": "Australia"}[x]
+)
+custom_query = st.text_input("🔍 Search keywords (optional)", "")
+
+start_date = st.date_input("Start date", date.today() - timedelta(days=7))
+end_date = st.date_input("End date", date.today())
+
+if st.button("🔍 Analyze Headlines"):
+    with st.spinner("Fetching and analyzing headlines..."):
+        headlines = get_news(category, country, start_date, end_date, custom_query)
+        if not headlines:
+            st.error("Couldn't fetch news. Check your API key or try again later.")
+        else:
+            results, details = analyze_sentiment(headlines)
+            st.success("Sentiment analysis complete!")
+
+            st.subheader("📊 Sentiment Distribution")
+            plot_sentiment_chart(results)
+
+            st.subheader("☁️ Word Cloud of Headlines")
+            show_wordcloud(headlines)
+
+            st.subheader("🟢 Positive Headlines")
+            display_headlines(details["positive"])
+
+            st.subheader("⚪ Neutral Headlines")
+            display_headlines(details["neutral"])
+
+            st.subheader("🔴 Negative Headlines")
+            display_headlines(details["negative"])
+
